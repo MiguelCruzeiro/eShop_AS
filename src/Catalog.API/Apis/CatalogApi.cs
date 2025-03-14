@@ -212,6 +212,7 @@ public static class CatalogApi
                 activity.AddTag("catalog.item.id", id);
                 activity.SetTag("operation.type", "item_lookup");
                 activity.SetTag("service.name", "CatalogAPI");
+                activity.SetTag("user.email", "email@gmail.com");
             }
 
             if (id <= 0)

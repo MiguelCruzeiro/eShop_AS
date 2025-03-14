@@ -84,6 +84,7 @@ public static partial class Extensions
                 tracing.AddAspNetCoreInstrumentation()
                     .AddGrpcClientInstrumentation()
                     .AddHttpClientInstrumentation()
+                    .AddProcessor<MaskSensitiveDataProcessor>()
                     .AddSource("Experimental.Microsoft.Extensions.AI")
                     .AddSource("CatalogAPI") 
                     .AddSource("eShop.Basket.API");                   
