@@ -4,11 +4,34 @@ using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Pgvector.EntityFrameworkCore;
+using System.Diagnostics.Metrics; // Add this import
+using System.Diagnostics; // For Stopwatch
 
 namespace eShop.Catalog.API;
 
 public static class CatalogApi
 {
+    // Add these static fields for metrics
+    private static readonly Meter s_meter = new("CatalogAPI");
+    
+    private static readonly Counter<long> s_itemViewsCounter = s_meter.CreateCounter<long>(
+        "catalog_item_views_total", 
+        description: "Number of times catalog items have been viewed");
+        
+    private static readonly Histogram<double> s_requestDuration = s_meter.CreateHistogram<double>(
+        "catalog_request_duration_seconds", 
+        unit: "s",
+        description: "Duration of catalog API requests");
+    
+    private static readonly Counter<long> s_itemSearchCounter = s_meter.CreateCounter<long>(
+        "catalog_item_searches_total", 
+        description: "Number of catalog item searches");
+
+    // Brand and type popularity
+    private static readonly Counter<long> s_brandTypeViewCounter = s_meter.CreateCounter<long>(
+        "catalog_brand_type_views_total",
+        description: "Number of views by brand and type");
+
     public static IEndpointRouteBuilder MapCatalogApi(this IEndpointRouteBuilder app)
     {
         // RouteGroupBuilder for catalog endpoints
@@ -140,10 +163,12 @@ public static class CatalogApi
         if (type is not null)
         {
             root = root.Where(c => c.CatalogTypeId == type);
+            s_brandTypeViewCounter.Add(1, new KeyValuePair<string, object>("type_id", type.Value));
         }
         if (brand is not null)
         {
             root = root.Where(c => c.CatalogBrandId == brand);
+            s_brandTypeViewCounter.Add(1, new KeyValuePair<string, object>("brand_id", brand.Value));
         }
 
         var totalItems = await root
@@ -173,21 +198,62 @@ public static class CatalogApi
         [AsParameters] CatalogServices services,
         [Description("The catalog item id")] int id)
     {
-        if (id <= 0)
+        var activity = Activity.Current;
+        activity.SetTag("operation.type", "item_lookup");
+
+        var stopwatch = Stopwatch.StartNew();
+        
+        try
         {
-            return TypedResults.BadRequest<ProblemDetails>(new (){
-                Detail = "Id is not valid"
-            });
+            //tags
+           
+            if (activity != null)
+            {
+                activity.AddTag("catalog.item.id", id);
+                activity.SetTag("operation.type", "item_lookup");
+                activity.SetTag("service.name", "CatalogAPI");
+            }
+
+            if (id <= 0)
+            {
+                return TypedResults.BadRequest<ProblemDetails>(new (){
+                    Detail = "Id is not valid"
+                });
+            }
+
+            var item = await services.Context.CatalogItems.Include(ci => ci.CatalogBrand).SingleOrDefaultAsync(ci => ci.Id == id);
+
+            if (item == null)
+            {
+                return TypedResults.NotFound();
+            }
+
+            // Add more valuable tags with item details
+            if (activity != null)
+            {
+                activity.SetTag("catalog.item.name", item.Name);
+                activity.SetTag("catalog.item.price", item.Price);
+                activity.SetTag("catalog.item.brand", item.CatalogBrand?.Brand ?? "unknown");
+                activity.SetTag("catalog.item.type", item.CatalogTypeId);
+            }
+            
+            // Record a view for this item
+            s_itemViewsCounter.Add(1, new KeyValuePair<string, object>("item_id", id));
+
+            // Track brand/type popularity
+            s_brandTypeViewCounter.Add(1, 
+                new KeyValuePair<string, object>("brand_id", item.CatalogBrandId),
+                new KeyValuePair<string, object>("type_id", item.CatalogTypeId));
+            
+            return TypedResults.Ok(item);
         }
-
-        var item = await services.Context.CatalogItems.Include(ci => ci.CatalogBrand).SingleOrDefaultAsync(ci => ci.Id == id);
-
-        if (item == null)
+        finally
         {
-            return TypedResults.NotFound();
+            stopwatch.Stop();
+            s_requestDuration.Record(stopwatch.Elapsed.TotalSeconds, 
+                new KeyValuePair<string, object>("endpoint", "GetItemById"),
+                new KeyValuePair<string, object>("item_id", id));
         }
-
-        return TypedResults.Ok(item);
     }
 
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest, "application/problem+json")]
@@ -288,6 +354,11 @@ public static class CatalogApi
         [Description("The type of items to return")] int typeId,
         [Description("The brand of items to return")] int? brandId)
     {
+        s_brandTypeViewCounter.Add(1, new KeyValuePair<string, object>("type_id", typeId));
+        if (brandId.HasValue)
+        {
+            s_brandTypeViewCounter.Add(1, new KeyValuePair<string, object>("brand_id", brandId.Value));
+        }
         return await GetAllItems(paginationRequest, services, null, typeId, brandId);
     }
 
@@ -297,6 +368,11 @@ public static class CatalogApi
         [AsParameters] CatalogServices services,
         [Description("The brand of items to return")] int? brandId)
     {
+        if (brandId.HasValue)
+        {
+            // Track brand popularity
+            s_brandTypeViewCounter.Add(1, new KeyValuePair<string, object>("brand_id", brandId.Value));
+        }
         return await GetAllItems(paginationRequest, services, null, null, brandId);
     }
 

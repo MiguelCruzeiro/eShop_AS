@@ -12,6 +12,30 @@ var postgres = builder.AddPostgres("postgres")
     .WithImageTag("latest")
     .WithLifetime(ContainerLifetime.Persistent);
 
+var otelCollector = builder.AddContainer("otel-collector", "otel/opentelemetry-collector")
+    .WithBindMount("../otel-collector", "/etc/otel-collector")
+    .WithEndpoint(4319, 4317, name: "otel-collector-otlp-grpc") // OTLP gRPC
+    .WithEndpoint(4320, 4318, name: "otel-collector-otlp-http") // OTLP HTTP
+    .WithBindMount("../otel-config/otel-config.yml", "/etc/otel-collector/config.yaml")
+    .WithArgs("--config=/etc/otel-collector/config.yaml"); // Explicitly specify config file
+
+var grafana = builder.AddContainer("grafana", "grafana/grafana")
+    .WithBindMount("../grafana/config", "/etc/grafana")
+    .WithBindMount("../grafana/dashboards", "/var/lib/grafana/dashboards")
+    .WithEndpoint(3000, 3000, name: "grafana-http", scheme: "http");
+
+var prometheus = builder.AddContainer("prometheus", "prom/prometheus")
+    .WithBindMount("../prometheus", "/etc/prometheus")
+    .WithEndpoint(9090, 9090, name: "prometheus-http", scheme: "http");
+
+var jaeger = builder.AddContainer("jaeger", "jaegertracing/all-in-one:1.35")
+    .WithEnvironment("COLLECTOR_OTLP_ENABLED", "true")
+    .WithEnvironment("COLLECTOR_ZIPKIN_HOST_PORT", ":9411")
+    .WithEndpoint(16686, 16686, name: "jaeger-ui", scheme: "http") // UI port
+    .WithEndpoint(4317, 4317, name: "jaeger-otlp-grpc") // OTLP gRPC
+    .WithEndpoint(4318, 4318, name: "jaeger-otlp-http") // OTLP HTTP
+    .WithEndpoint(9411, 9411, name: "jaeger-zipkin"); // Zipkin compatibility
+
 var catalogDb = postgres.AddDatabase("catalogdb");
 var identityDb = postgres.AddDatabase("identitydb");
 var orderDb = postgres.AddDatabase("orderingdb");
@@ -29,11 +53,15 @@ var identityEndpoint = identityApi.GetEndpoint(launchProfileName);
 var basketApi = builder.AddProject<Projects.Basket_API>("basket-api")
     .WithReference(redis)
     .WithReference(rabbitMq).WaitFor(rabbitMq)
+    .WithEnvironment("GRAFANA_URL", grafana.GetEndpoint("grafana-http"))
     .WithEnvironment("Identity__Url", identityEndpoint);
 redis.WithParentRelationship(basketApi);
 
 var catalogApi = builder.AddProject<Projects.Catalog_API>("catalog-api")
     .WithReference(rabbitMq).WaitFor(rabbitMq)
+    .WithEnvironment("GRAFANA_URL", grafana.GetEndpoint("grafana-http"))
+    .WithEnvironment("JAEGER_ENDPOINT", jaeger.GetEndpoint("jaeger-otlp-http"))
+    .WithEnvironment("JAEGER_UI_URL", jaeger.GetEndpoint("jaeger-ui"))
     .WithReference(catalogDb);
 
 var orderingApi = builder.AddProject<Projects.Ordering_API>("ordering-api")
@@ -73,7 +101,8 @@ var webApp = builder.AddProject<Projects.WebApp>("webapp", launchProfileName)
     .WithReference(catalogApi)
     .WithReference(orderingApi)
     .WithReference(rabbitMq).WaitFor(rabbitMq)
-    .WithEnvironment("IdentityUrl", identityEndpoint);
+    .WithEnvironment("IdentityUrl", identityEndpoint)
+    .WithEnvironment("GRAFANA_URL", grafana.GetEndpoint("grafana-http"));
 
 // set to true if you want to use OpenAI
 bool useOpenAI = false;

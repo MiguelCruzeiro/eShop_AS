@@ -8,6 +8,9 @@ using Microsoft.Extensions.Logging;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol;
+
 
 namespace eShop.ServiceDefaults;
 
@@ -61,7 +64,14 @@ public static partial class Extensions
                 metrics.AddAspNetCoreInstrumentation()
                     .AddHttpClientInstrumentation()
                     .AddRuntimeInstrumentation()
-                    .AddMeter("Experimental.Microsoft.Extensions.AI");
+                    .AddMeter("Experimental.Microsoft.Extensions.AI")
+                    .AddMeter("CatalogAPI");
+                metrics.AddRuntimeInstrumentation()
+                    .AddMeter(
+                        "Microsoft.AspNetCore.Hosting",
+                        "System.Net.Http",
+                        "Microsoft.AspNetCore.Server.Kestrel"
+                    );
             })
             .WithTracing(tracing =>
             {
@@ -74,7 +84,9 @@ public static partial class Extensions
                 tracing.AddAspNetCoreInstrumentation()
                     .AddGrpcClientInstrumentation()
                     .AddHttpClientInstrumentation()
-                    .AddSource("Experimental.Microsoft.Extensions.AI");                    
+                    .AddSource("Experimental.Microsoft.Extensions.AI")
+                    .AddSource("CatalogAPI") 
+                    .AddSource("eShop.Basket.API");                   
             });
 
         builder.AddOpenTelemetryExporters();
@@ -84,14 +96,37 @@ public static partial class Extensions
 
     private static IHostApplicationBuilder AddOpenTelemetryExporters(this IHostApplicationBuilder builder)
     {
-        var useOtlpExporter = !string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]);
+        var services = builder.Services;
+        var configuration = builder.Configuration;
 
-        if (useOtlpExporter)
+        // Configure default OTLP exporter if endpoint is provided
+        if (!string.IsNullOrWhiteSpace(configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]))
         {
-            builder.Services.Configure<OpenTelemetryLoggerOptions>(logging => logging.AddOtlpExporter());
-            builder.Services.ConfigureOpenTelemetryMeterProvider(metrics => metrics.AddOtlpExporter());
-            builder.Services.ConfigureOpenTelemetryTracerProvider(tracing => tracing.AddOtlpExporter());
+            services.Configure<OpenTelemetryLoggerOptions>(logging => logging.AddOtlpExporter());
+            services.ConfigureOpenTelemetryMeterProvider(metrics => metrics.AddOtlpExporter());
+            services.ConfigureOpenTelemetryTracerProvider(tracing => tracing.AddOtlpExporter());
         }
+
+        // Configure custom OTLP exporter if custom endpoint is provided
+        if (!string.IsNullOrWhiteSpace(configuration["CUSTOM_OTEL_EXPORTER_OTLP_ENDPOINT"]))
+        {
+            var endpoint = new Uri(configuration["CUSTOM_OTEL_EXPORTER_OTLP_ENDPOINT"]!);
+
+            services.Configure<OpenTelemetryLoggerOptions>(logging => 
+                logging.AddOtlpExporter(options => options.Endpoint = endpoint));
+
+            services.ConfigureOpenTelemetryMeterProvider(metrics => 
+                metrics.AddOtlpExporter(options => options.Endpoint = endpoint));
+
+            services.ConfigureOpenTelemetryTracerProvider(tracing => 
+                tracing.AddOtlpExporter(options => options.Endpoint = endpoint));
+        }
+
+        // Add Prometheus exporter for metrics
+        services.AddOpenTelemetry().WithMetrics(metrics =>
+        {
+            metrics.AddPrometheusExporter();
+        });
 
         return builder;
     }
@@ -108,7 +143,7 @@ public static partial class Extensions
     public static WebApplication MapDefaultEndpoints(this WebApplication app)
     {
         // Uncomment the following line to enable the Prometheus endpoint (requires the OpenTelemetry.Exporter.Prometheus.AspNetCore package)
-        // app.MapPrometheusScrapingEndpoint();
+        app.MapPrometheusScrapingEndpoint();
 
         // Adding health checks endpoints to applications in non-development environments has security implications.
         // See https://aka.ms/dotnet/aspire/healthchecks for details before enabling these endpoints in non-development environments.
